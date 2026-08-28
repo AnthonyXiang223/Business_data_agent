@@ -1,35 +1,156 @@
-# 数据集元数据：Agent 通过 list_datasets / get_dataset_schema 读取。
-# 业务口径沉淀在这里，物理表用英文列名，业务含义用中文补充。
-ecommerce_sales:
-  description: >
-    模拟电商订单明细数据（2025-01 至 2026-07），用于数据分析 Agent 测试。
-    共约 5000 行，含少量脏数据（缺失、非法日期、负数量、重复行）。
-    注意：amount 存在缺失和负 quantity 行，分析前需做数据质量检查。
-  columns:
-    order_id: 订单编号（唯一标识，存在少量重复脏数据）
-    order_date: 下单日期（YYYY-MM-DD，含少量非法日期）
-    region: 收货地区（华东/华南/华北/西南/东北/华中）
-    category: 商品品类（手机数码/家用电器/服饰鞋包/美妆个护/食品生鲜/图书文娱）
-    product: 商品名称
-    channel: 销售渠道（天猫/京东/抖音/拼多多/线下门店）
-    customer_age_group: 客户年龄段
-    quantity: 购买数量（含少量负数脏数据）
-    unit_price: 商品单价（元）
-    amount: 订单金额（元，= quantity * unit_price，含少量缺失）
-    is_returned: 是否退货（0 否 / 1 是）
+# 数据集元数据：列级口径 + 指标口径（Agent 计算指标的权威来源）
+# - 7 个数据集同 schema（2024 电商交易，12 中文字段），列口径用 YAML 锚点共享
+# - 指标参考SQL 的表名必须等于数据集名（护栏要求），因此逐数据集声明
+# - 口径变更走 git review；参考SQL 必须能直接在本数据集上执行
+
+阿里1688:
+  description: 阿里巴巴1688平台 2024 年全年交易明细（1000 条购买记录，用户/商品/交易三维度）
+  columns: &platform_columns
+    用户ID: 用户唯一标识（U1000-U9999），同一用户可有多条购买记录
+    用户姓名: 随机生成的模拟姓名，仅用于展示，不参与统计口径
+    商品ID: 商品唯一标识（P10000-P99999）
+    商品名称: 具体商品名称
+    商品类别: 商品一级分类，共 7 类：电子产品/服装/家居/书籍/美妆/运动/玩具
+    单价: 商品单件销售价格（人民币元）
+    购买时间: 交易时间（字符串 YYYY-MM-DD HH:MM:SS，2024 全年）；按日期统计时需 TRY_CAST(购买时间 AS DATE)
+    购买数量: 该条记录购买件数（1-5 件）
+    消费金额: 该条记录总金额（= 单价 × 购买数量），GMV 与客单价的计算基础
+    用户城市: 用户所在城市（12 个主要城市）
+    用户性别: 用户性别（男/女）
+    用户年龄: 用户年龄（18-65 岁）
   metrics:
     销售额_GMV:
-      定义: "退货前订单金额总和，剔除 amount 为空的订单"
-      参考SQL: "SELECT SUM(amount) AS gmv FROM ecommerce_sales WHERE amount IS NOT NULL"
-    净销售额:
-      定义: "剔除退货订单后的销售额，剔除 amount 为空的订单"
-      参考SQL: "SELECT SUM(amount) AS net_sales FROM ecommerce_sales WHERE is_returned = 0 AND amount IS NOT NULL"
-    退货率:
-      定义: "退货订单数 / 有效订单总数（订单维度，与公司财务口径一致）"
-      参考SQL: "SELECT CAST(SUM(is_returned) AS DOUBLE) / COUNT(*) AS return_rate FROM ecommerce_sales WHERE amount IS NOT NULL"
-    客单价:
-      定义: "净销售额 / 有效订单数"
-      参考SQL: "SELECT CAST(SUM(amount) AS DOUBLE) / COUNT(*) AS avg_order_value FROM ecommerce_sales WHERE is_returned = 0 AND amount IS NOT NULL"
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM 阿里1688 WHERE 消费金额 IS NOT NULL
     销售件数:
-      定义: "售出商品总件数，剔除负数量脏数据"
-      参考SQL: "SELECT SUM(quantity) AS total_quantity FROM ecommerce_sales WHERE quantity > 0"
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM 阿里1688
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM 阿里1688 WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM 阿里1688 GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM 阿里1688 WHERE 消费金额 IS NOT NULL
+
+京东:
+  description: 京东平台 2024 年全年交易明细（1000 条购买记录，用户/商品/交易三维度）
+  columns: *platform_columns
+  metrics:
+    销售额_GMV:
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM 京东 WHERE 消费金额 IS NOT NULL
+    销售件数:
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM 京东
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM 京东 WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM 京东 GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM 京东 WHERE 消费金额 IS NOT NULL
+
+天猫:
+  description: 天猫平台 2024 年全年交易明细（1000 条购买记录，用户/商品/交易三维度）
+  columns: *platform_columns
+  metrics:
+    销售额_GMV:
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM 天猫 WHERE 消费金额 IS NOT NULL
+    销售件数:
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM 天猫
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM 天猫 WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM 天猫 GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM 天猫 WHERE 消费金额 IS NOT NULL
+
+淘宝:
+  description: 淘宝平台 2024 年全年交易明细（1000 条购买记录，用户/商品/交易三维度）
+  columns: *platform_columns
+  metrics:
+    销售额_GMV:
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM 淘宝 WHERE 消费金额 IS NOT NULL
+    销售件数:
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM 淘宝
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM 淘宝 WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM 淘宝 GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM 淘宝 WHERE 消费金额 IS NOT NULL
+
+拼多多:
+  description: 拼多多平台 2024 年全年交易明细（1000 条购买记录，用户/商品/交易三维度）
+  columns: *platform_columns
+  metrics:
+    销售额_GMV:
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM 拼多多 WHERE 消费金额 IS NOT NULL
+    销售件数:
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM 拼多多
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM 拼多多 WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM 拼多多 GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM 拼多多 WHERE 消费金额 IS NOT NULL
+
+苏宁易购:
+  description: 苏宁易购平台 2024 年全年交易明细（1000 条购买记录，用户/商品/交易三维度）
+  columns: *platform_columns
+  metrics:
+    销售额_GMV:
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM 苏宁易购 WHERE 消费金额 IS NOT NULL
+    销售件数:
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM 苏宁易购
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM 苏宁易购 WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM 苏宁易购 GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM 苏宁易购 WHERE 消费金额 IS NOT NULL
+
+ecommerce_data:
+  description: 电商平台 2024 年全年交易明细（15000 条购买记录，与各平台数据集同 schema）
+  columns: *platform_columns
+  metrics:
+    销售额_GMV:
+      定义: 所有购买记录的消费金额合计（消费金额为 NULL 的记录不计入），反映整体销售规模
+      参考SQL: SELECT SUM(消费金额) AS gmv FROM ecommerce_data WHERE 消费金额 IS NOT NULL
+    销售件数:
+      定义: 所有购买记录的购买数量合计
+      参考SQL: SELECT SUM(购买数量) AS total_qty FROM ecommerce_data
+    客单价:
+      定义: 平均每条购买记录的消费金额 = 消费金额合计 ÷ 购买记录数。注意：本数据集无订单ID，"单"按一条购买记录计
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(*) AS 客单价 FROM ecommerce_data WHERE 消费金额 IS NOT NULL
+    复购率:
+      定义: 购买次数不少于 2 次的用户数 ÷ 总用户数（均按用户ID去重）
+      参考SQL: SELECT CAST(COUNT(DISTINCT CASE WHEN cnt >= 2 THEN 用户ID END) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 复购率 FROM (SELECT 用户ID, COUNT(*) AS cnt FROM ecommerce_data GROUP BY 用户ID)
+    人均消费金额:
+      定义: 消费金额合计 ÷ 去重用户数
+      参考SQL: SELECT CAST(SUM(消费金额) AS DOUBLE) / COUNT(DISTINCT 用户ID) AS 人均消费 FROM ecommerce_data WHERE 消费金额 IS NOT NULL

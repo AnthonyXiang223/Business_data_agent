@@ -163,7 +163,7 @@ def get_data_profile(name: str) -> str:
 
     # 日期列：有效范围 + 非法值数量
     for col in df.columns:
-        if "date" in col.lower() or "日期" in col:
+        if "date" in col.lower() or "日期" in col or "时间" in col:
             parsed = pd.to_datetime(df[col], errors="coerce")
             invalid = df[col].notna() & parsed.isna()
             out.append(
