@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# langgraph dev in-memory checkpoint state
+.langgraph_api/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Env
+.env
+
+# Claude Code local config
+.claude/
+
+# Debug traces
+trace_full.json
+
+# 个人练习文件（与主线无关）
+fast1.py

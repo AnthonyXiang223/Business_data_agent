@@ -1,0 +1,35 @@
+# 数据集元数据：Agent 通过 list_datasets / get_dataset_schema 读取。
+# 业务口径沉淀在这里，物理表用英文列名，业务含义用中文补充。
+ecommerce_sales:
+  description: >
+    模拟电商订单明细数据（2025-01 至 2026-07），用于数据分析 Agent 测试。
+    共约 5000 行，含少量脏数据（缺失、非法日期、负数量、重复行）。
+    注意：amount 存在缺失和负 quantity 行，分析前需做数据质量检查。
+  columns:
+    order_id: 订单编号（唯一标识，存在少量重复脏数据）
+    order_date: 下单日期（YYYY-MM-DD，含少量非法日期）
+    region: 收货地区（华东/华南/华北/西南/东北/华中）
+    category: 商品品类（手机数码/家用电器/服饰鞋包/美妆个护/食品生鲜/图书文娱）
+    product: 商品名称
+    channel: 销售渠道（天猫/京东/抖音/拼多多/线下门店）
+    customer_age_group: 客户年龄段
+    quantity: 购买数量（含少量负数脏数据）
+    unit_price: 商品单价（元）
+    amount: 订单金额（元，= quantity * unit_price，含少量缺失）
+    is_returned: 是否退货（0 否 / 1 是）
+  metrics:
+    销售额_GMV:
+      定义: "退货前订单金额总和，剔除 amount 为空的订单"
+      参考SQL: "SELECT SUM(amount) AS gmv FROM ecommerce_sales WHERE amount IS NOT NULL"
+    净销售额:
+      定义: "剔除退货订单后的销售额，剔除 amount 为空的订单"
+      参考SQL: "SELECT SUM(amount) AS net_sales FROM ecommerce_sales WHERE is_returned = 0 AND amount IS NOT NULL"
+    退货率:
+      定义: "退货订单数 / 有效订单总数（订单维度，与公司财务口径一致）"
+      参考SQL: "SELECT CAST(SUM(is_returned) AS DOUBLE) / COUNT(*) AS return_rate FROM ecommerce_sales WHERE amount IS NOT NULL"
+    客单价:
+      定义: "净销售额 / 有效订单数"
+      参考SQL: "SELECT CAST(SUM(amount) AS DOUBLE) / COUNT(*) AS avg_order_value FROM ecommerce_sales WHERE is_returned = 0 AND amount IS NOT NULL"
+    销售件数:
+      定义: "售出商品总件数，剔除负数量脏数据"
+      参考SQL: "SELECT SUM(quantity) AS total_quantity FROM ecommerce_sales WHERE quantity > 0"
