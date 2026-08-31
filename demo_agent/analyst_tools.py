@@ -1,12 +1,14 @@
-"""阶段 1：业务数据分析 Agent 的工具集。
+"""业务数据分析 Agent 工具集（取数 5 工具 + create_chart 图表工具）。
 
 设计原则：
 - 返回紧凑：所有工具结果截断（最多 20 行预览 + 总行数），避免撑爆 LLM 上下文
 - 只读：工具只查询数据，不修改数据文件
 - 护栏：query_data 用 sqlglot 语法树校验，只放行单条 SELECT/WITH，
   表名必须等于数据集名，无 LIMIT 时自动注入
+- create_chart：契约 v1 校验在工具内部，成功返回规范化 JSON（丢未知键）
 """
 
+import json
 from pathlib import Path
 
 import duckdb
@@ -41,6 +43,15 @@ def _get_df(name: str) -> pd.DataFrame:
             raise ValueError(f"数据集 {name} 不存在，请先用 list_datasets 查看可用数据集")
         _df_cache[name] = pd.read_csv(path)
     return _df_cache[name]
+
+
+def _dataset_not_found(name: str) -> str:
+    """数据集名错误的友好提示：直接给出可用名单，省一次 list_datasets 往返。"""
+    available = [p.stem for p in sorted(DATA_DIR.glob("*.csv"))]
+    return (
+        f"数据集 {name!r} 不存在，可用数据集: {', '.join(available)}。"
+        f"请用正确的数据集名重试（SQL 表名必须等于数据集名）"
+    )
 
 
 def _count_rows(path: Path) -> int:
@@ -95,6 +106,48 @@ def _format_result(df: pd.DataFrame) -> str:
     )
 
 
+CHART_TYPES = ("bar", "line", "pie", "table")
+
+
+def _validate_chart_spec(spec) -> tuple[bool, str]:
+    """图表规格契约 v1 校验：返回 (是否通过, 错误原因)。
+
+    只读已知键，未知键忽略（LLM 可能多传字段，输出时重建规范化 spec 丢弃）。
+    """
+    if not isinstance(spec, dict):
+        return False, "spec 必须是 JSON 对象"
+    title = spec.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return False, "title 必须是非空字符串"
+    chart_type = spec.get("chart_type")
+    if chart_type not in CHART_TYPES:
+        return False, f"chart_type 必须是 {'|'.join(CHART_TYPES)} 之一，收到 {chart_type!r}"
+    data = spec.get("data")
+    if not isinstance(data, dict):
+        return False, "缺少 data 对象"
+    categories = data.get("categories")
+    if not isinstance(categories, list) or not categories or not all(isinstance(c, str) for c in categories):
+        return False, "data.categories 必须是非空字符串列表"
+    series = data.get("series")
+    if not isinstance(series, list) or not series:
+        return False, "data.series 必须是非空列表"
+    for i, s in enumerate(series):
+        if not isinstance(s, dict) or not isinstance(s.get("name"), str) or not s["name"].strip():
+            return False, f"series[{i}].name 必须是非空字符串"
+        values = s.get("values")
+        # bool 是 int 子类，必须显式排除
+        if not isinstance(values, list) or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in values
+        ):
+            return False, f"series[{i}]（{s['name']}）.values 必须是数值列表"
+        if chart_type in ("bar", "line") and len(values) != len(categories):
+            return False, (
+                f"series[{i}]（{s['name']}）values 长度 {len(values)} "
+                f"与 categories 长度 {len(categories)} 不一致"
+            )
+    return True, ""
+
+
 # ---------- 对外工具 ----------
 
 def list_datasets() -> str:
@@ -116,7 +169,10 @@ def get_dataset_schema(name: str) -> str:
     Args:
         name: 数据集名
     """
-    df = _get_df(name)
+    try:
+        df = _get_df(name)
+    except ValueError:
+        return _dataset_not_found(name)
     meta = _load_metadata().get(name, {}).get("columns", {})
     lines = [f"数据集 {name}：{len(df)} 行 × {len(df.columns)} 列"]
     for col in df.columns:
@@ -137,7 +193,10 @@ def get_data_profile(name: str) -> str:
     Args:
         name: 数据集名
     """
-    df = _get_df(name)
+    try:
+        df = _get_df(name)
+    except ValueError:
+        return _dataset_not_found(name)
     out = [f"数据画像：{name}", f"规模: {len(df)} 行 × {len(df.columns)} 列"]
 
     # 缺失率
@@ -181,7 +240,10 @@ def get_metric_definitions(name: str, keyword: str = "") -> str:
 
     Args:
         name: 数据集名
-        keyword: 可选，按关键词过滤指标（如 "退货"），为空返回全部指标
+        keyword: 可选，按关键词过滤指标（如 "退货"），为空返回全部指标。
+            用户的原话表述可直接传入（如 "卖了多少钱"），工具会按指标名/
+            定义/aliases 同义表述表归一匹配，无需自行翻译成指标名。
+            关键词命中多个候选口径时，返回会提示必须先向用户确认再计算。
     """
     all_metrics = _load_metadata().get(name, {}).get("metrics", {})
     if not all_metrics:
@@ -189,7 +251,12 @@ def get_metric_definitions(name: str, keyword: str = "") -> str:
     if keyword:
         metrics = {
             k: v for k, v in all_metrics.items()
-            if keyword in k or keyword in v.get("定义", "")
+            if keyword in k
+            or keyword in v.get("定义", "")
+            or any(
+                keyword in a or a in keyword  # 双向包含：短别名可命中长原话（"每单多少钱" in "平均每单多少钱"）
+                for a in (v.get("aliases") or [])
+            )
         }
         if not metrics:
             return (
@@ -203,6 +270,14 @@ def get_metric_definitions(name: str, keyword: str = "") -> str:
         lines.append(f"- {metric}: {spec.get('定义', '')}")
         if spec.get("参考SQL"):
             lines.append(f"  参考SQL: {spec['参考SQL']}")
+    # 歧义提示：关键词命中多个候选口径 = 用户表述存在歧义信号。
+    # 放在工具返回里（而非只靠 prompt 规则），模型按"数据"服从，实测比规则有效。
+    if keyword and len(metrics) >= 2:
+        lines.append(
+            f"⚠️ 关键词 {keyword!r} 匹配到 {len(metrics)} 个候选口径"
+            f"（{', '.join(metrics)}）：用户未指明具体用哪个指标时，"
+            f"必须先向用户确认再计算，禁止默认选择其一作答。"
+        )
     return "\n".join(lines)
 
 
@@ -215,6 +290,15 @@ def query_data(name: str, sql: str) -> str:
     Args:
         name: 数据集名（SQL 中作为表名使用，列名见 get_dataset_schema）
         sql: 查询语句，例如 "SELECT category, SUM(amount) AS total FROM ecommerce_sales GROUP BY category ORDER BY total DESC"
+
+    分桶查询（CASE WHEN 区间分组）写法要求：每个区间显式写上下界（如
+    WHEN 用户年龄 > 40），禁止用 ELSE 兜底；未覆盖的取值用 WHERE 排除或反问用户。
+    示例：
+    SELECT CASE WHEN 用户年龄 BETWEEN 20 AND 30 THEN '20-30岁'
+                WHEN 用户年龄 BETWEEN 31 AND 40 THEN '31-40岁'
+                WHEN 用户年龄 > 40 THEN '40岁以上' END AS 年龄段,
+           COUNT(*) AS 订单数
+    FROM 淘宝 WHERE 商品类别 = '玩具' AND 用户年龄 >= 20 GROUP BY 1
     """
     ok, result = _validate_sql(name, sql)
     if not ok:
@@ -228,3 +312,47 @@ def query_data(name: str, sql: str) -> str:
     finally:
         conn.close()
     return _format_result(df)
+
+
+def create_chart(spec: dict) -> str:
+    """生成标准图表规格 JSON（前端据此渲染图表）。校验通过后返回规范化 JSON 字符串。
+
+    chart spec 契约 v1：
+    {
+      "title": "图表标题",
+      "chart_type": "bar | line | pie | table",
+      "data": {
+        "categories": ["维度取值", ...],
+        "series": [{"name": "序列名", "values": [数值, ...]}]
+      }
+    }
+    选型规则：时间趋势 → line；分类对比 → bar；占比 → pie；明细列表 → table。
+    调用时机：仅在用户明确要求画图/图表时才调用，用户没要求时不要主动生成图表。
+    约束：bar/line 的每个 series 的 values 长度必须等于 categories 长度；
+    pie 通常单个 series；table 的 categories 是列头、series 是行。
+    数据未确认（口径/数值未核实）前不要调用本工具。
+    校验失败会返回原因，请按错误信息修正后重试。
+
+    Args:
+        spec: 图表规格对象（契约字段之外的键会被忽略）
+    """
+    ok, reason = _validate_chart_spec(spec)
+    if not ok:
+        return f"[图表校验失败] {reason}"
+    # 重建规范化 spec：只保留契约字段，丢弃 LLM 多传的未知键
+    normalized = {
+        "title": spec["title"].strip(),
+        "chart_type": spec["chart_type"],
+        "data": {
+            "categories": spec["data"]["categories"],
+            "series": [
+                {"name": s["name"].strip(), "values": s["values"]}
+                for s in spec["data"]["series"]
+            ],
+        },
+    }
+    try:
+        # allow_nan=False：NaN/Infinity 直接报错，让 LLM 修正而不是产出前端解析不了的数据
+        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except ValueError as e:
+        return f"[图表校验失败] 数值不合法（NaN/Infinity）: {e}"

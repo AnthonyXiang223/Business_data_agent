@@ -1,20 +1,24 @@
 [project]
 name = "research_deepagent"
 version = "0.1.0"
-description = "Research DeepAgent — DeepAgents research agent with Tavily search, served by langgraph dev."
+description = "业务数据分析 Agent —— deepagents 单 Agent（取数 5 工具 + create_chart），由 langgraph dev 服务。"
 authors = [{ name = "Your Name" }]
 requires-python = ">=3.12"
 dependencies = [
+    # --- 核心框架与基础设施（deepagents / langchain / OpenAI 兼容网关 / dev server） ---
     "deepagents>=0.5.3",
     "langchain>=1.0",
-    "langchain-anthropic>=1.0",
-    "langchain-google-genai>=4.0",
     "langchain-openai>=0.3",
-    "tavily-python>=0.5",
-    "httpx[socks]>=0.28",
-    "markdownify>=0.13",
     "python-dotenv>=1.0",
     "langgraph-cli[inmem]>=0.4",
+    # --- demo_agent 主线依赖（数据分析 Agent / 工具层 / 评估集） ---
+    "duckdb>=1.5.5",
+    "pandas>=3.0.5",
+    "numpy>=2.5.2",
+    "sqlglot>=30.17.0",
+    "pyyaml>=6.0.3",
+    "langsmith>=0.11.0",
+    "json-repair>=0.63",
 ]
 
 [build-system]

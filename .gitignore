@@ -22,5 +22,8 @@ frontend/dist/
 # Debug traces
 trace_full.json
 
+# 评估断点续跑状态
+.eval_state/
+
 # 个人练习文件（与主线无关）
 fast1.py
