@@ -143,7 +143,58 @@ def _extract_records(messages: list) -> list[tuple[str, str]]:
 # 运行与聚合
 # ---------------------------------------------------------------------------
 
-def _run_once(agent, question: str, tag: str = "") -> dict:
+def _build_messages(question: str, history: list[dict] | None) -> list[dict]:
+    """拼装输入消息：脚本化历史（user/assistant 交替）+ 本轮 question。
+
+    history 是"理想的第一轮对话"，不真跑——所以本次 invoke 里捕获到的
+    所有工具调用都属于最后一轮，first_shot/值包含判分无需适配。
+    """
+    messages: list[dict] = []
+    for turn in history or []:
+        messages.append({"role": "user", "content": turn["question"]})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def _walk_tool_calls(runs: list) -> list[dict]:
+    """从进程内 Run 树提取全部工具调用（含嵌套子智能体），供多轮成本统计。
+
+    与 _walk_cb_runs 同源但不过滤工具：多轮评测要数的不止 query_data，
+    还有 get_data_profile/get_dataset_schema/get_metric_definitions 的重查次数。
+    """
+    calls: list[dict] = []
+    for r in runs:
+        if r.run_type == "tool":
+            calls.append({"name": r.name, "args": r.inputs or {}})
+        calls.extend(_walk_tool_calls(r.child_runs or []))
+    return calls
+
+
+def _tool_stats(calls: list[dict]) -> dict:
+    """多轮成本指标。
+
+    profile/schema/口径重查 = 第二轮重复第一轮已完成的工作（第一轮的
+    结论已在脚本化历史里）；重复 SQL = 同一查询执行多次的浪费。
+    """
+    names: dict[str, int] = {}
+    for c in calls:
+        names[c["name"]] = names.get(c["name"], 0) + 1
+    sqls = [
+        str(c["args"].get("sql"))
+        for c in calls
+        if c["name"] in ("query_data", "_logged_query_data") and c["args"].get("sql")
+    ]
+    return {
+        "profile_recalls": names.get("get_data_profile", 0),
+        "schema_recalls": names.get("get_dataset_schema", 0),
+        "metric_recalls": names.get("get_metric_definitions", 0),
+        "duplicate_sql": len(sqls) - len(set(sqls)),
+        "total_tool_calls": len(calls),
+    }
+
+
+def _run_once(agent, question: str, history: list[dict] | None = None, tag: str = "") -> dict:
     """单次尝试：调用 agent，返回 (最终文本, 记录快照, 各类标志)。
 
     SQL 捕获：collect_runs 进程内 Run 树（含子智能体嵌套轨迹），
@@ -154,11 +205,10 @@ def _run_once(agent, question: str, tag: str = "") -> dict:
     config: dict = {}
     if tag:
         config["metadata"] = {"eval_attempt": tag}  # LangSmith UI 可辨识的尝试标签
+    messages = _build_messages(question, history)
     with collect_runs() as cb:
         try:
-            out = agent.invoke(
-                {"messages": [{"role": "user", "content": question}]}, config=config
-            )
+            out = agent.invoke({"messages": messages}, config=config)
         except Exception as e:
             records = _walk_cb_runs(cb.traced_runs)
             return {
@@ -166,9 +216,11 @@ def _run_once(agent, question: str, tag: str = "") -> dict:
                 "records": records,
                 "rounds": len(records),
                 "blocked": False,
+                "tool_stats": _tool_stats(_walk_tool_calls(cb.traced_runs)),
                 "error": f"{type(e).__name__}: {str(e)[:300]}",
             }
         records = _walk_cb_runs(cb.traced_runs)
+        tool_calls = _walk_tool_calls(cb.traced_runs)
     final_text = out["messages"][-1].content
     snapshot = records
     if not snapshot:
@@ -179,6 +231,7 @@ def _run_once(agent, question: str, tag: str = "") -> dict:
         "records": snapshot,
         "rounds": len(snapshot),
         "blocked": blocked,
+        "tool_stats": _tool_stats(tool_calls),
     }
 
 
@@ -195,7 +248,9 @@ def attempt_worker(case: dict, agent, run_idx: int) -> tuple[str, dict]:
     result_box: dict = {}
 
     def _invoke():
-        result_box["att"] = _run_once(agent, case["question"], tag=tag)
+        result_box["att"] = _run_once(
+            agent, case["question"], history=case.get("history"), tag=tag
+        )
 
     t = threading.Thread(target=_invoke, daemon=True)
     t.start()
@@ -206,6 +261,7 @@ def attempt_worker(case: dict, agent, run_idx: int) -> tuple[str, dict]:
             "records": [],
             "rounds": 0,
             "blocked": False,
+            "tool_stats": {},
             "error": f"尝试超时（>{ATTEMPT_TIMEOUT}s，疑似模型绕圈），已放弃",
         }
     else:
@@ -214,6 +270,7 @@ def attempt_worker(case: dict, agent, run_idx: int) -> tuple[str, dict]:
             "records": [],
             "rounds": 0,
             "blocked": False,
+            "tool_stats": {},
             "error": "invoke 未返回结果",
         }
     # judge 在本线程执行，先归零本线程计数（invoke 在子线程跑，计数不共享）
@@ -237,6 +294,7 @@ def serialize_attempt(att: dict) -> dict:
         "rounds": att["rounds"],
         "blocked": att["blocked"],
         "judge_calls": att["judge_calls"],
+        "tool_stats": att.get("tool_stats", {}),
     }
 
 
@@ -264,6 +322,16 @@ def aggregate(case: dict, attempts: list[dict], judge_calls: int) -> dict:
             for t in a["verdict"].get("issue_tags", []):
                 tags[t] = tags.get(t, 0) + 1
 
+    # 多轮成本指标（仅 follow-up 题：单轮题的画像/口径调用是期望行为，不是浪费）
+    tool_stats = None
+    if case.get("history"):
+        keys = ("profile_recalls", "schema_recalls", "metric_recalls",
+                "duplicate_sql", "total_tool_calls")
+        tool_stats = {
+            k: sum(a.get("tool_stats", {}).get(k, 0) for a in attempts) / len(attempts)
+            for k in keys
+        }
+
     return {
         "pass_rate": len(passed) / len(attempts),
         "first_shot": first_shot,
@@ -272,4 +340,5 @@ def aggregate(case: dict, attempts: list[dict], judge_calls: int) -> dict:
         "judge_calls": judge_calls,
         "via": via,
         "issue_tags": tags,
+        "tool_stats": tool_stats,
     }

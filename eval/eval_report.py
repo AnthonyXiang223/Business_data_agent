@@ -27,6 +27,13 @@ def print_summary(results: list[dict]) -> None:
             f"{_pct(m['self_repair']):<8} {m['avg_rounds']:<6.1f} {m['judge_calls']:<6} "
             f"{r['case']['question'][:32]}"
         )
+        if m.get("tool_stats"):
+            ts = m["tool_stats"]
+            print(
+                f"{'':<18}  └ 多轮成本: 画像重查 {ts['profile_recalls']:.1f} · "
+                f"schema重查 {ts['schema_recalls']:.1f} · 口径重查 {ts['metric_recalls']:.1f} · "
+                f"重复SQL {ts['duplicate_sql']:.1f} · 均工具调用 {ts['total_tool_calls']:.1f}"
+            )
     print("=" * 100)
     n = len(results)
     print(f"总通过率: {total_pass / n:.0%}")

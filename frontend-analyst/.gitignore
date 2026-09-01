@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# tsc -b 编译产物（与 vite.config.ts 同目录生成）
+vite.config.js
+vite.config.d.ts

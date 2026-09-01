@@ -266,6 +266,12 @@ def get_metric_definitions(name: str, keyword: str = "") -> str:
     else:
         metrics = all_metrics
     lines = [f"数据集 {name} 的指标口径（计算指标必须以以下定义为准）："]
+    # 防参考SQL锚定：模型曾照抄总量模板、漏掉问题中的品类条件（如"玩具"），
+    # 故明确声明参考SQL只是公式模板，过滤条件必须从用户问题提取。
+    lines.append(
+        "注意：参考SQL仅为口径公式模板，不含任何业务过滤条件；"
+        "查询时必须按用户问题自行提取全部维度条件（平台/品类/时间/地区等）加入 WHERE。"
+    )
     for metric, spec in metrics.items():
         lines.append(f"- {metric}: {spec.get('定义', '')}")
         if spec.get("参考SQL"):

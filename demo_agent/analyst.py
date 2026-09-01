@@ -12,7 +12,7 @@ import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-
+import atexit
 import json_repair
 
 # langgraph dev 对 path 形式 graph 用 spec_from_file_location 加载，不会把本目录加进
@@ -25,6 +25,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 from deepagents import create_deep_agent
+from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware.summarization import SummarizationMiddleware
+from langgraph.checkpoint.postgres import PostgresSaver
+from psycopg_pool import ConnectionPool
+from psycopg.rows import dict_row
+
 
 from analyst_tools import (
     create_chart,
@@ -36,6 +42,8 @@ from analyst_tools import (
 )
 
 load_dotenv()
+
+backend = FilesystemBackend(root_dir=str(Path(__file__).resolve().parent / "workspace"))
 
 model = ChatOpenAI(
     model_name=os.environ.get("OPENAI_MODEL_NAME", "Qwen/Qwen3-8B"),
@@ -116,6 +124,7 @@ def _is_unusable_response(response: ModelResponse) -> bool:
     return False
 
 
+
 def _repair_or_none(response: ModelResponse) -> ModelResponse | None:
     """畸形工具调用本地修复（零额外 LLM 调用）；修复成功返回替换响应，否则 None。"""
     for msg in response.result or []:
@@ -179,9 +188,22 @@ class _EmptyTurnRetryMiddleware(AgentMiddleware):
         return await _guard_async_model_call(request, handler)
 
 
+checkpointer = PostgresSaver(
+    ConnectionPool(
+        conninfo=os.environ["POSTGRES_URL"],
+        open=True,
+        min_size=1,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+    )
+)
+# 池有后台连接线程，退出前显式关闭
+atexit.register(checkpointer.conn.close)
+
 agent = create_deep_agent(
     model=model,
-    middleware=[_EmptyTurnRetryMiddleware()],
+    middleware=[_EmptyTurnRetryMiddleware(),
+        SummarizationMiddleware(model=model,backend=backend,trigger=("tokens", 32_000),keep=("messages", 10),),
+        ],
     tools=[
         list_datasets,
         get_dataset_schema,
@@ -191,20 +213,16 @@ agent = create_deep_agent(
         create_chart,
     ],
     system_prompt=ANALYST_PROMPT,
+    checkpointer=checkpointer,
+
 )
 
 if __name__ == "__main__":
-    # 单轮问答。两种输入方式：
-    #   1) 命令行参数: analyst.py "你的问题"
-    #   2) 不带参数: 交互式提示输入（或管道传入，如 echo "问题" | analyst.py）
-    if len(sys.argv) > 1:
-        question = sys.argv[1]
-    elif sys.stdin.isatty():
-        question = input("请输入你的问题: ").strip()
-    else:
-        question = sys.stdin.read().strip()
-    if not question:
-        print('用法: ../.venv/bin/python analyst.py "你的问题"')
-        sys.exit(1)
-    result = agent.invoke({"messages": [{"role": "user", "content": question}]})
-    print(result["messages"][-1].content)
+    config={"configurable": {"thread_id":"cli-demo"}}
+    print("多轮模式：连续输入问题即可追问，空行退出")
+    while True:
+        question=input("user:").strip()
+        if not question:
+            break
+        result=agent.invoke({"messages":[{"role":"user","content":question}]},config=config)
+        print(result["messages"][-1].content)

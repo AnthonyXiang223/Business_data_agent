@@ -19,7 +19,7 @@ DEFAULT_DATASET = "京东"
 
 _REQUIRED_FIELDS = {"id", "type", "question"}
 
-
+# 负责执行agent产出的sql
 def run_sql(sql: str, name: str = DEFAULT_DATASET) -> pd.DataFrame:
     """在同一个 duckdb 引擎、同一份注册数据上执行 SQL（golden 与 Agent SQL 共用）。"""
     conn = duckdb.connect()
@@ -29,8 +29,8 @@ def run_sql(sql: str, name: str = DEFAULT_DATASET) -> pd.DataFrame:
     finally:
         conn.close()
 
-
-def load_cases() -> list[dict]:
+# 读yaml，校验并运行sql语句拿到标准答案
+def load_cases() -> list[dict]:     
     with open(CASES_FILE, encoding="utf-8") as f:
         cases = yaml.safe_load(f)
     for c in cases:
@@ -45,4 +45,13 @@ def load_cases() -> list[dict]:
         elif c["type"] in ("clarify", "clarify_small", "negative"):
             if not c.get("expected_behavior"):
                 raise ValueError(f"行为题 {c['id']} 缺少 expected_behavior")
+        history = c.get("history")
+        if history is not None:
+            # 多轮 follow-up 题：脚本化历史 = [{question, answer}, ...]，
+            # 只真跑最后一轮 question，golden 只对应最后一轮
+            if not isinstance(history, list) or not history:
+                raise ValueError(f"题目 {c['id']} 的 history 必须是非空列表")
+            for i, turn in enumerate(history):
+                if not isinstance(turn, dict) or not turn.get("question") or not turn.get("answer"):
+                    raise ValueError(f"题目 {c['id']} 的 history[{i}] 缺少 question/answer")
     return cases
