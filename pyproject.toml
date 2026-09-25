@@ -9,6 +9,7 @@ dependencies = [
     "deepagents>=0.5.3",
     "langchain>=1.0",
     "langchain-openai>=0.3",
+    "langgraph-checkpoint-postgres>=3.1",
     "python-dotenv>=1.0",
     "langgraph-cli[inmem]>=0.4",
     # --- demo_agent 主线依赖（数据分析 Agent / 工具层 / 评估集） ---
@@ -19,6 +20,19 @@ dependencies = [
     "pyyaml>=6.0.3",
     "langsmith>=0.11.0",
     "json-repair>=0.63",
+    # --- 缓存层（agent/redis_cache.py：SQL 结果 + RAG 检索结果缓存） ---
+    "redis>=5.0",
+    # --- RAG 管道（rag/：chunk/嵌入/入库/检索——历史遗留：主机手装未进清单，
+    #     Docker 容器化时暴露，已补齐） ---
+    "psycopg[binary]>=3.1",
+    "psycopg-pool>=3.2",
+    "pgvector>=0.3",
+    "jieba>=0.42",
+    "rank-bm25>=0.2",
+    "sentence-transformers>=3.0",
+    "python-docx>=1.1",
+    # --- 服务层（server/：FastAPI + SSE + 审计） ---
+    "fastapi>=0.115",
 ]
 
 [build-system]

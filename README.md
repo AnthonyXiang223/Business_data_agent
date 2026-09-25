@@ -1,69 +1,56 @@
-# Research DeepAgent
+# 📊 数据分析智能体 · Data Analysis Agent
 
-Pure DeepAgents research agent scaffolded with `agentseek create deepagents/research`.
+<p align="center">
+  <!-- TODO: 放一张界面横幅截图，例如 docs/screenshot.png（三栏工作台 + 图表看板） -->
+  <img src="./docs/screenshot.png" width="100%" />
+</p>
 
-The backend serves a `create_deep_agent(...)` graph through `langgraph dev`.
-The frontend streams user messages, tool calls, optional sub-agent delegation,
-DeepAgents todos, and the final markdown answer. AgentSeek is only used as an
-external template and lifecycle tool; this project declares local behavior in
-`.agentseek/lifecycle.toml`.
+> **面向业务人员的多步骤开放式数据分析智能体：给一份数据，从数据质量探查、口径核验、指标计算到洞察与图表，一条对话完成——比 BI 平台更灵活，比直接问 LLM 更可信。**
 
-## Quickstart
+## 这是什么？
+
+一个基于 **LangGraph / DeepAgents** 构建的生产级业务数据分析师系统。业务人员用自然语言提问，Agent 自主完成：
+
+- 前置探查数据质量（缺失 / 重复 / 非法日期），严格按口径文档计算指标
+- 多维下钻、时序趋势（环比 / 同比）、分布对比、相关性分析
+- 检索业务知识库（向量 + BM25 双路召回 → RRF 融合 → rerank 精排）为结论提供权威依据
+- 生成带编号的 SVG 图表，支持导出 PNG / SVG / CSV
+
+<img src="docs/image-20260925205512613.png" alt="image-20260925205512613" style="zoom:33%;" />
+
+## Quick Start
+
+### 方式一：Docker 部署（推荐，一条命令拉起全家）
+
+前置要求：Docker（+Compose）、约 20GB 磁盘、一个 LLM API Key（任何 OpenAI 兼容网关均可）
 
 ```bash
-cp .env.example .env
-cp frontend/.env.example frontend/.env
-$EDITOR .env
-
-uvx agentseek task sync
-uvx agentseek task frontend
-
-uvx agentseek info
-uvx agentseek doctor
-uvx agentseek dev --dry-run
-uvx agentseek dev
+git clone https://github.com/AnthonyXiang223/research_deepagent.git
+cd research_deepagent
+cp .env.example .env              # 编辑：填入你的 LLM key
+./scripts/pull-base-images.sh     # 基础镜像（国内网络自动走镜像源）
+./scripts/fetch_models.sh         # 嵌入模型 bge-m3 + reranker（约 6.5GB）
+docker compose up -d --build
+docker compose run --rm kb-init   # 首次：知识库分块+嵌入入库
 ```
 
-Use `uvx agentseek task --list` to see the one-shot setup tasks exposed by the
-lifecycle spec. After `uvx agentseek dev` starts both processes, run
-`uvx agentseek doctor --live` from another terminal to check the declared local
-service endpoints.
+浏览器打开 **http://localhost:5175**，开始提问。
 
-The LangGraph backend defaults to `http://127.0.0.1:2024`.
-The frontend defaults to `http://127.0.0.1:5174`.
+### 方式二：本地开发模式
 
-## Environment
-
-`agent.py` uses `AGENTSEEK_MODEL_PROVIDER` to choose a native LangChain provider
-integration for OpenAI, Anthropic, or Gemini. Fill only the credential block for
-the selected provider in `.env`. If that provider's base URL is blank, LangChain
-uses the official endpoint.
-
-If you change `AGENTSEEK_MODEL_PROVIDER`, also change `AGENTSEEK_MODEL` to a
-model served by that provider. The generated app defaults to provider `openai`
-and model `gpt-4.1-mini`, so leaving `OPENAI_API_BASE` blank targets the
-official OpenAI endpoint. `AGENTSEEK_MODEL` can also be supplied through the
-compatibility aliases `DEEPAGENTS_MODEL` or `BUB_MODEL`.
-
-`TAVILY_API_KEY` is required for the `tavily_search` tool. The lifecycle spec
-checks that one provider API key exists through `OPENAI_API_KEY` plus the
-`ANTHROPIC_API_KEY` and `GOOGLE_API_KEY` aliases; it does not validate that the
-key matches the selected provider.
-
-`frontend/.env` only controls the browser app's LangGraph URL and Vite port.
-
-## Smoke test
-
-Open `http://127.0.0.1:5174` and ask:
-
-```text
-Research what LangGraph 1.0 added vs 0.x. Cite sources.
+```bash
+# 后端（项目根目录，依赖安装走清华镜像）
+uv pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -e .
+.venv/bin/python -m uvicorn server.main:app --port 8000
+# 前端（另一终端）
+cd frontend-analyst && npm install && npm run dev
 ```
 
-Expected behavior:
+### 用自己的数据体验
 
-- A live **Research plan** todo panel appears when the agent writes todos.
-- Tool cards appear for `tavily_search` and, when the model delegates,
-  `task` as a "Sub-agent: research-agent" card.
-- Each card expands while running, then collapses after its result lands.
-- The final assistant response renders as markdown with linked citations.
+1. 把 CSV 放进 `data/`，在 `data/datasets.yaml` 里写列级口径与指标定义
+2. 口径文档（.docx）放进 `rag/`，重跑 `docker compose run --rm kb-init`
+3. 重新提问——Agent 会按你的口径文档计算你的指标
+
+## 
+

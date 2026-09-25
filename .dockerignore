@@ -1,0 +1,21 @@
+# 构建上下文排除清单：server 镜像的构建上下文是项目根目录，
+# 不排除的话整个 .venv（10GB+）和前端 node_modules 都会打包进
+# 构建上下文——上传慢、构建缓存大，且 .env 进镜像 = 密钥泄露
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.env
+node_modules
+**/node_modules
+# 前端两个工程由各自的构建上下文处理，server 镜像用不到
+frontend
+frontend-analyst
+eval
+*.md
+fast1.py
+langgraph.json
+# 7GB 模型：运行时 bind mount 挂载、绝无进镜像的可能——排除后构建上下文
+# 从 ~7GB 缩到 ~几百 KB（实测：不排除每次构建白传 6.88GB）
+rag/models

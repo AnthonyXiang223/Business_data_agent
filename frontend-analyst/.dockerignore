@@ -1,0 +1,9 @@
+# 前端构建上下文排除清单
+# node_modules：容器里用 npm ci 全新安装（宿主机的不能跨平台复用，
+#   拷进去既大又可能带本机平台的二进制）
+# dist：构建产物在容器里重新生成
+# .env：API 地址由 Dockerfile 的 ENV 注入（/api 同源方案），
+#   宿主机 .env 指向 127.0.0.1:8000 拷进去会覆盖掉它
+node_modules
+dist
+.env

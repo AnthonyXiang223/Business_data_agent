@@ -1,0 +1,135 @@
+# RAG 检索评估集（阶段 7：检索评估集）
+# 测 rag/ 检索管道（向量+BM25 → RRF → rerank → 低置信守卫）的检索质量。
+#
+# 字段约定：
+# - expect: hit=正样本（期望守卫放行）/ miss=负样本（库里没有，期望守卫拦截）
+# - golden: 答案必需块（Recall 分母）——锚定 (doc, index) 而非 chunk_id
+#   （kb_build 原子重建后 chunk_id 全变；index 是 docx 解析顺序，内容不变则稳定）
+# - snippet: golden 块内容开头 ~20 字，加载时与 PG 实际内容比对——
+#   docx 改动导致 index 漂移时加载即失败，防止评估静默错标
+# - related: 相关但非必需的块（只进 Precision 口径，不进 Recall 分母）——
+#   kb 小，全量标注可行，修正"只标 golden 时 precision 被低估"的偏差
+# - diagnostic: true = 诊断用例，不计入汇总指标
+#
+# 查询词规则（铁律 8）：agent 应传归一后的自然问句。旧管道曾实测关键词式
+# 查询触发 rerank 低分（0.10）误报"未找到"；当前 kb/模型下 6 组关键词变体
+# 全部正常（0.85-1.00）无法复现——diag_keyword_query 保留作回归守卫：
+# 若未来换 reranker/重切 kb 后关键词路径回归，这道题会先亮。
+
+# ---------- 指标公式 ----------
+
+- id: gmv_formula
+  expect: hit
+  question: GMV 的计算公式是什么
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 9, snippet: "业务定义：统计周期内所有订单消费金额的总和"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 19, snippet: "字段间的核心计算关系如下"}
+
+- id: atv_formula
+  expect: hit
+  question: 客单价的计算公式是什么
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 10, snippet: "业务定义：平均每笔订单的消费金额"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 19, snippet: "字段间的核心计算关系如下"}
+
+- id: per_capita
+  expect: hit
+  question: 人均消费金额是怎么计算的
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 13, snippet: "用户数：按用户 ID 去重统计"}
+
+# ---------- 口径细节（语义匹配） ----------
+
+- id: gmv_refund
+  expect: hit
+  question: GMV 是否需要扣除退款金额
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 23, snippet: "• 数据未包含退款、优惠、运费等字段"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 20, snippet: "• 所有金额字段单位为人民币元"}
+
+# ---------- 字段含义 ----------
+
+- id: userid_format
+  expect: hit
+  question: 用户ID的取值格式是什么
+  golden:
+    - {doc: 电商数据表字段说明文档.docx, index: 4, snippet: "业务含义：用户的唯一标识符"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 18, snippet: "| 字段 | 类型 | 范围 / 格式 |"}
+    - {doc: 电商业务口径文档.docx, index: 5, snippet: "用户维度描述交易中的买家主体信息"}
+
+- id: amount_formula
+  expect: hit
+  question: 消费金额是怎么算出来的
+  golden:
+    - {doc: 电商数据表字段说明文档.docx, index: 15, snippet: "业务含义：订单的总金额"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 19, snippet: "字段间的核心计算关系如下"}
+    - {doc: 电商业务口径文档.docx, index: 7, snippet: "交易维度描述每笔订单的交易事实"}
+
+- id: city_values
+  expect: hit
+  question: 用户城市字段有哪些取值
+  golden:
+    - {doc: 电商数据表字段说明文档.docx, index: 8, snippet: "业务含义：用户所在的中国主要城市"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 17, snippet: "| 字段 | 取值集合 |"}
+    - {doc: 电商业务口径文档.docx, index: 17, snippet: "按用户城市统计，共 12 个城市"}
+
+# ---------- 表格块 ----------
+
+- id: field_overview
+  expect: hit
+  question: 这份数据一共有哪些字段
+  golden:
+    - {doc: 电商数据表字段说明文档.docx, index: 3, snippet: "| 字段名 | 中文名 | 类型 | 业务维度 | 说明 |"}
+  related:
+    - {doc: 电商业务口径文档.docx, index: 4, snippet: "数据共 12 个字段"}
+
+- id: jd_gmv
+  expect: hit
+  question: 京东平台的GMV是多少
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 15, snippet: "| 平台 | 订单数 | GMV（元）"}
+
+- id: category_values
+  expect: hit
+  question: 商品类别有哪些取值
+  golden:
+    - {doc: 电商数据表字段说明文档.docx, index: 11, snippet: "业务含义：商品所属的一级分类"}
+  related:
+    - {doc: 电商数据表字段说明文档.docx, index: 17, snippet: "| 字段 | 取值集合 |"}
+    - {doc: 电商业务口径文档.docx, index: 6, snippet: "商品维度描述交易中涉及的商品信息"}
+
+# ---------- 跨块多 golden ----------
+
+- id: atv_vs_percapita
+  expect: hit
+  question: 客单价和人均消费有什么区别
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 10, snippet: "业务定义：平均每笔订单的消费金额"}
+    - {doc: 电商业务口径文档.docx, index: 13, snippet: "用户数：按用户 ID 去重统计"}
+
+# ---------- 负样本（库里没有，期望守卫拦截） ----------
+
+- id: neg_repurchase
+  expect: miss
+  question: 复购率的定义是什么
+  golden: []
+
+- id: neg_net_sales
+  expect: miss
+  question: 净销售额的计算公式是什么
+  golden: []
+
+# ---------- 诊断用例（不计入汇总） ----------
+
+- id: diag_keyword_query
+  expect: hit
+  diagnostic: true
+  question: 人均消费金额 计算公式
+  golden:
+    - {doc: 电商业务口径文档.docx, index: 13, snippet: "用户数：按用户 ID 去重统计"}

@@ -5,6 +5,10 @@
 import { parseChartSpec, type ChartSpec } from "../ChartCard";
 
 export type RawToolCall = { id?: string; name?: string; args?: unknown };
+
+/** 本轮运行元信息（done/stopped 事件真实数据：工具次数/token/耗时）。 */
+export type RunMeta = { toolCalls?: number; tokens?: number | null; durationMs?: number };
+
 export type Message = {
   id?: string;
   type: string;
@@ -12,9 +16,18 @@ export type Message = {
   tool_calls?: RawToolCall[];
   tool_call_id?: string;
   name?: string;
+  meta?: RunMeta; // 仅 AI 消息携带（恢复的历史消息无 done 事件 → 无 meta）
+  stopped?: boolean; // 已停止标记（仅 AI 消息携带）
 };
 
-export type ProseRow = { kind: "prose"; key: string; role: "human" | "ai"; body: string };
+export type ProseRow = {
+  kind: "prose";
+  key: string;
+  role: "human" | "ai";
+  body: string;
+  meta?: RunMeta;
+  stopped?: boolean;
+};
 export type FigureRow = { kind: "figure"; key: string; number: number; spec: ChartSpec };
 export type Row = ProseRow | FigureRow;
 
@@ -49,9 +62,17 @@ export function buildRows(messages: Message[]): Row[] {
     } else if (msg.type === "ai") {
       // tool_calls 数组本身永不渲染；空文本的携带消息不产生任何行
       //（create_chart 的调用载体消息就这样被静默吞掉，图在工具结果到达时出现）。
+      // 例外：停止/元信息标记时即使没文字也要出最小行（"已停止"反馈）。
       const body = messageText(msg.content).trim();
-      if (body) {
-        rows.push({ kind: "prose", key: msg.id ?? `a-${rows.length}`, role: "ai", body });
+      if (body || msg.meta || msg.stopped) {
+        rows.push({
+          kind: "prose",
+          key: msg.id ?? `a-${rows.length}`,
+          role: "ai",
+          body,
+          meta: msg.meta,
+          stopped: msg.stopped,
+        });
       }
     } else if (msg.type === "tool") {
       if (msg.name !== "create_chart") continue; // 其余工具流量全不可见

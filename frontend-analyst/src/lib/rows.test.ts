@@ -108,4 +108,31 @@ describe("buildRows", () => {
     const rows = buildRows(msgs);
     expect(rows.map((r) => r.kind)).toEqual(["prose", "figure", "prose"]);
   });
+
+  it("passes run meta and stopped through to the ai prose row", () => {
+    const rows = buildRows([
+      {
+        id: "a1",
+        type: "ai",
+        content: "结论",
+        meta: { toolCalls: 2, tokens: 100, durationMs: 5000 },
+        stopped: true,
+      },
+    ]);
+    expect(rows).toEqual([
+      {
+        kind: "prose",
+        key: "a1",
+        role: "ai",
+        body: "结论",
+        meta: { toolCalls: 2, tokens: 100, durationMs: 5000 },
+        stopped: true,
+      },
+    ]);
+  });
+
+  it("renders a minimal row for a stopped ai message with empty content", () => {
+    const rows = buildRows([{ id: "a1", type: "ai", content: "", stopped: true }]);
+    expect(rows).toEqual([{ kind: "prose", key: "a1", role: "ai", body: "", stopped: true }]);
+  });
 });

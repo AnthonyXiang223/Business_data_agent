@@ -1,0 +1,110 @@
+# ============================================================
+# 业务数据分析 Agent 全栈编排
+# 用法：
+#   docker compose up -d --build     # 构建并后台拉起全部服务
+#   docker compose run --rm kb-init  # 首次：知识库入库（一次性任务）
+#   docker compose down              # 全部停止（数据在卷里，不丢）
+#   docker compose down -v           # 停止并清空数据库卷（重置一切）
+# ============================================================
+
+services:
+  # ---------- PostgreSQL（pgvector 扩展） ----------
+  # 三个库表：kb_chunks/kb_documents（向量知识库）、checkpoints（会话历史）、
+  # audit_logs（审计）。用官方 pgvector 镜像：扩展预装，省去手动 CREATE EXTENSION
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: analyst      # 库用户
+      POSTGRES_PASSWORD: analyst  # 密码（本机演示用；生产务必改强密码）
+      POSTGRES_DB: analyst        # 初始数据库
+    volumes:
+      # 命名卷：数据落在 Docker 管理的卷里，容器删了数据还在。
+      # 不用 bind mount 的原因：PG 数据目录属主/权限敏感，交给卷最省心
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # 健康检查：pg_isready 是 PG 自带的探活工具
+      # retries 20 × interval 5s ≈ 最多等 100s（首次初始化慢）
+      test: ["CMD-SHELL", "pg_isready -U analyst -d analyst"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------- Redis（四类缓存：SQL/RAG/embedding/stat） ----------
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------- 知识库入库（一次性任务，跑完即退） ----------
+  # 任务容器的概念：与常驻服务共用同一镜像/挂载，但 command 是"干完活就退出"
+  # profiles: [init] 让它默认不随 up 启动，需要时手动：
+  #   docker compose run --rm kb-init
+  kb-init:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      # 构建期走宿主机网络：容器 bridge NAT 到清华源的下载极不稳定
+      # （15s→300s 超时都撑不过），host 网络直接复用宿主机 11MB/s 的好路由
+      network: host
+    command: ["python", "rag/kb_build.py"]   # 建扩展/建表/分块/嵌入/入库
+    environment:
+      # 连接 db 容器：compose 网络内直接用服务名 db 解析
+      POSTGRES_URL: postgresql://analyst:analyst@db:5432/analyst
+    volumes:
+      - ./data:/app/data                      # 数据 CSV
+      - ./rag/models:/app/rag/models          # 7GB 嵌入模型（不进镜像）
+    depends_on:
+      db:
+        condition: service_healthy            # 等 PG 探活成功才开工
+    profiles: ["init"]
+
+  # ---------- 服务层（FastAPI :8000） ----------
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      # 构建期走宿主机网络（理由见 kb-init 同名注释）
+      network: host
+    # env_file 注入宿主机 .env（LLM 网关 key、LangSmith 等）——
+    # 密钥走环境变量注入容器，永远不进镜像层（镜像可能被分享/push）
+    env_file: .env
+    environment:
+      # 容器内的连接串覆盖 .env 里的宿主机地址（后者在容器里不存在）
+      POSTGRES_URL: postgresql://analyst:analyst@db:5432/analyst
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      # bind mount（宿主机目录直挂）：./data → 容器 /app/data
+      # 模型 7GB 同理。宿主机改数据文件，容器立刻可见（无拷贝）
+      - ./data:/app/data
+      - ./rag/models:/app/rag/models
+    depends_on:
+      # condition: service_healthy = 等依赖真正"可用"再启动，
+      # 而不是"容器起了"（起了 ≠ 数据库能连）
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # slim 镜像没有 curl，用 Python 标准库探活（不额外装包）
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s    # 宽限期：import 构建 agent 要十几秒，别误杀
+
+  # ---------- 前端（nginx :80，宿主端口 5175） ----------
+  web:
+    build:
+      context: ./frontend-analyst   # 构建上下文=前端目录（有它自己的 Dockerfile）
+    ports:
+      # "5175:80" = 宿主机 5175 映射容器 80——对外端口与开发期一致
+      - "5175:80"
+    depends_on:
+      - server
+
+# 顶层 volumes 声明命名卷（db 服务引用它）
+volumes:
+  pgdata:

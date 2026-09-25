@@ -47,9 +47,40 @@ describe("MessageFlow", () => {
     expect(screen.getByText(/图表如下/)).toBeTruthy();
   });
 
-  it("shows the empty hint when there are no rows and not loading", () => {
-    render(<MessageFlow rows={[]} loading={false} error={null} />);
-    expect(screen.getByText(/试试/)).toBeTruthy();
+  it("renders run meta and the stopped badge on an ai row", () => {
+    render(
+      <MessageFlow
+        rows={[
+          {
+            kind: "prose",
+            key: "a1",
+            role: "ai",
+            body: "部分结论",
+            meta: { toolCalls: 3, tokens: 1234, durationMs: 42000 },
+            stopped: true,
+          },
+        ]}
+        loading={false}
+        error={null}
+      />,
+    );
+
+    expect(screen.getByText("已停止")).toBeTruthy();
+    expect(screen.getByText(/工具调用 3 次/)).toBeTruthy();
+    expect(screen.getByText(/1,234 tokens/)).toBeTruthy();
+    expect(screen.getByText(/42 秒/)).toBeTruthy();
+  });
+
+  it("renders a minimal stopped row even without body text", () => {
+    render(
+      <MessageFlow
+        rows={[{ kind: "prose", key: "a1", role: "ai", body: "", stopped: true }]}
+        loading={false}
+        error={null}
+      />,
+    );
+
+    expect(screen.getByText("已停止")).toBeTruthy();
   });
 
   it("shows loading and error states", () => {

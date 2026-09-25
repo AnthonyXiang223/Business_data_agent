@@ -1,4 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { DownloadSimple } from "@phosphor-icons/react";
+import { downloadCsv, exportFileName, exportPng, exportSvg } from "./lib/chartExport";
 
 // ChartCard: renders the agent's chart spec v1 as hand-rolled SVG (bar/line/pie)
 // or an HTML table. Visual rules follow the Nature-figure aesthetic (open axes,
@@ -59,7 +61,7 @@ export function parseChartSpec(result: string): ChartSpec | null {
 const W = 640;
 const H = 400;
 const M = { left: 56, right: 20, top: 16 };
-const FONT = 12;
+const FONT = 13; // 与 styles.css 的 --fs-small 保持一致（标签宽度估算的基准字号）
 
 function fmtNum(v: number): string {
   return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
@@ -102,6 +104,42 @@ function truncateLabel(label: string, maxChars: number): string {
   return label.length > maxChars ? `${label.slice(0, maxChars - 1)}…` : label;
 }
 
+/** 横轴标签抽稀：返回应显示的类别下标（保持水平、绝不重叠、绝不旋转）。
+ * 相邻可见标签的间距须容纳两者半宽之和（预留 2px 间隙）；步长从 1 起
+ * 逐级放宽直到全部相邻对都放得下；首尾标签优先保留（时间序列端点有意义）。
+ * 导出的纯函数，单测覆盖。 */
+export function visibleLabelIndices(cats: string[], slotW: number, maxChars = 14): number[] {
+  const n = cats.length;
+  if (n === 0) return [];
+  const widths = cats.map((c) => estLabelWidth(truncateLabel(c, maxChars), FONT));
+  const fits = (a: number, b: number) =>
+    (widths[a] + widths[b]) / 2 <= Math.abs(a - b) * slotW - 2;
+  let stride = 1;
+  while (stride < n) {
+    let ok = true;
+    for (let i = stride; i < n; i += stride) {
+      if (!fits(i, i - stride)) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) break;
+    stride++;
+  }
+  const out: number[] = [];
+  for (let i = 0; i < n; i += stride) out.push(i);
+  // 端点优先（时间序列最后一天有意义）：放不下时依次让出前一个可见标签
+  while (out.length > 1 && out[out.length - 1] !== n - 1) {
+    if (fits(n - 1, out[out.length - 1])) {
+      out.push(n - 1);
+      break;
+    }
+    out.pop();
+  }
+  if (out.length === 1 && out[0] !== n - 1 && fits(n - 1, out[0])) out.push(n - 1);
+  return out;
+}
+
 function niceStep(range: number, target: number): number {
   const raw = range / target;
   const mag = 10 ** Math.floor(Math.log10(raw));
@@ -133,26 +171,30 @@ function tooltipStyle(x: number, y: number): { left: string; top: string } {
 
 function DataTable({ spec }: { spec: ChartSpec }) {
   return (
-    <table className="chart-card__table">
-      <thead>
-        <tr>
-          <th></th>
-          {spec.data.categories.map((c) => (
-            <th key={c}>{c}</th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {spec.data.series.map((s) => (
-          <tr key={s.name}>
-            <th scope="row">{s.name}</th>
-            {s.values.map((v, i) => (
-              <td key={i}>{fmtNum(v)}</td>
+    // 滚动容器：宽表（多类别×长值）的最小内容宽度会撑破卡片/界面，
+    // 包一层 overflow-x 让它超出时横向滚动而不是溢出
+    <div className="chart-card__table-wrap">
+      <table className="chart-card__table">
+        <thead>
+          <tr>
+            <th></th>
+            {spec.data.categories.map((c) => (
+              <th key={c}>{c}</th>
             ))}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {spec.data.series.map((s) => (
+            <tr key={s.name}>
+              <th scope="row">{s.name}</th>
+              {s.values.map((v, i) => (
+                <td key={i}>{fmtNum(v)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -188,9 +230,9 @@ function BarPlot({
 
   const plotW = W - M.left - M.right;
   const band = plotW / cats.length;
-  const longest = Math.max(...cats.map((c) => estLabelWidth(truncateLabel(c, 14), FONT)));
-  const rotate = longest > band;
-  const bottom = rotate ? 58 : 30;
+  // 横轴标签抽稀：保持水平，放不下的下标跳过（旋转标签已废弃——禁止斜放/重叠）
+  const labelIdxs = new Set(visibleLabelIndices(cats, band));
+  const bottom = 30;
   const plotH = H - M.top - bottom;
   const y = (v: number) => M.top + plotH - (v / yMax) * plotH;
 
@@ -228,7 +270,7 @@ function BarPlot({
       {cats.map((cat, ci) => {
         const gx = M.left + ci * band + (band - groupW) / 2;
         const xPos = M.left + ci * band + band / 2;
-        const labelY = H - (rotate ? 10 : 4);
+        const labelY = H - 4;
         return (
           <g key={cat}>
             {plotSeries.map((s, si) => {
@@ -279,16 +321,21 @@ function BarPlot({
                   </text>
                 );
               })}
-            <text
-              x={xPos}
-              y={labelY}
-              textAnchor={rotate ? "end" : "middle"}
-              transform={rotate ? `rotate(-30 ${xPos} ${labelY})` : undefined}
-              className="chart-card__cat-label"
-            >
-              {truncateLabel(cat, 14)}
-              <title>{cat}</title>
-            </text>
+            {labelIdxs.has(ci) ? (
+              <text x={xPos} y={labelY} textAnchor="middle" className="chart-card__cat-label">
+                {truncateLabel(cat, 14)}
+                <title>{cat}</title>
+              </text>
+            ) : (
+              // 被抽稀的槽位保留短刻度，轴位仍可对齐
+              <line
+                x1={xPos}
+                x2={xPos}
+                y1={M.top + plotH}
+                y2={M.top + plotH + 5}
+                className="chart-card__axis"
+              />
+            )}
           </g>
         );
       })}
@@ -319,6 +366,8 @@ function LinePlot({
   const plotH = H - M.top - bottom;
   const plotW = W - M.left - M.right;
   const band = plotW / cats.length;
+  // 横轴标签抽稀：30 个日期等密集类别全部渲染必然重叠，间隔显示 + 短刻度
+  const labelIdxs = new Set(visibleLabelIndices(cats, band));
   const span = yMax - yMin || 1;
   const y = (v: number) => M.top + ((yMax - v) / span) * plotH;
   const x = (ci: number) => M.left + ci * band + band / 2;
@@ -437,12 +486,23 @@ function LinePlot({
         );
       })}
 
-      {cats.map((cat, ci) => (
-        <text key={cat} x={x(ci)} y={H - 8} textAnchor="middle" className="chart-card__cat-label">
-          {truncateLabel(cat, 14)}
-          <title>{cat}</title>
-        </text>
-      ))}
+      {cats.map((cat, ci) =>
+        labelIdxs.has(ci) ? (
+          <text key={cat} x={x(ci)} y={H - 8} textAnchor="middle" className="chart-card__cat-label">
+            {truncateLabel(cat, 14)}
+            <title>{cat}</title>
+          </text>
+        ) : (
+          <line
+            key={cat}
+            x1={x(ci)}
+            x2={x(ci)}
+            y1={M.top + plotH}
+            y2={M.top + plotH + 5}
+            className="chart-card__axis"
+          />
+        ),
+      )}
     </svg>
   );
 }
@@ -548,6 +608,8 @@ function PiePlot({
 
 export default function ChartCard({ spec }: { spec: ChartSpec }) {
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const hide = () => setTooltip(null);
 
   const makeHandlers = (show: TooltipState): HoverHandlers => ({
@@ -556,6 +618,38 @@ export default function ChartCard({ spec }: { spec: ChartSpec }) {
     onFocus: () => setTooltip(show),
     onBlur: hide,
   });
+
+  // 导出菜单：外部点击 / Escape 关闭
+  useEffect(() => {
+    if (!exportOpen) return;
+    function onDocDown(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setExportOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setExportOpen(false);
+    }
+    document.addEventListener("mousedown", onDocDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [exportOpen]);
+
+  function handleExport(kind: "png" | "svg" | "csv") {
+    if (kind === "csv") {
+      downloadCsv(spec, exportFileName(spec.title, "csv"));
+    } else {
+      const svg = rootRef.current?.querySelector<SVGSVGElement>("svg.chart-card__svg");
+      if (!svg) return;
+      const name = exportFileName(spec.title, kind);
+      if (kind === "png") void exportPng(svg, name);
+      else exportSvg(svg, name);
+    }
+    setExportOpen(false);
+  }
 
   if (!spec.data.categories.length || !spec.data.series.length) {
     return (
@@ -582,8 +676,54 @@ export default function ChartCard({ spec }: { spec: ChartSpec }) {
     );
 
   return (
-    <div className="chart-card">
-      <h4 className="chart-card__title">{spec.title}</h4>
+    <div className="chart-card" ref={rootRef}>
+      <div className="chart-card__head">
+        <h4 className="chart-card__title">{spec.title}</h4>
+        <div className="chart-card__export">
+          <button
+            className="chart-card__export-toggle"
+            type="button"
+            aria-label="导出图表"
+            aria-expanded={exportOpen}
+            onClick={() => setExportOpen((v) => !v)}
+          >
+            <DownloadSimple size={14} />
+          </button>
+          {exportOpen && (
+            <div className="chart-card__export-menu" role="menu">
+              {spec.chart_type === "table" ? (
+                <button
+                  className="chart-card__export-item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleExport("csv")}
+                >
+                  导出 CSV
+                </button>
+              ) : (
+                <>
+                  <button
+                    className="chart-card__export-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => handleExport("png")}
+                  >
+                    导出 PNG
+                  </button>
+                  <button
+                    className="chart-card__export-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => handleExport("svg")}
+                  >
+                    导出 SVG
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
       {showLegend && (
         <div className="chart-card__legend" role="list">
           {spec.chart_type === "pie"

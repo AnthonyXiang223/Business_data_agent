@@ -3,7 +3,7 @@
     "."
   ],
   "graphs": {
-    "analyst": "./demo_agent/analyst.py:agent"
+    "analyst": "./agent/analyst.py:agent"
   },
   "env": "./.env"
 }

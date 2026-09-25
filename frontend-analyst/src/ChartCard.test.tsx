@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import ChartCard, { parseChartSpec, type ChartSpec } from "./ChartCard";
+import ChartCard, { parseChartSpec, type ChartSpec, visibleLabelIndices } from "./ChartCard";
 
 afterEach(() => {
   cleanup();
@@ -299,5 +299,113 @@ describe("ChartCard", () => {
     );
     // 同一系列不同类别用不同档位；第二系列换橙组
     expect(fills).toEqual(["#e8eaf6", "#f5d9cb", "#bbcfe8", "#eea78b"]);
+  });
+});
+
+describe("visibleLabelIndices", () => {
+  it("keeps every label when they fit", () => {
+    expect(visibleLabelIndices(["数码", "服饰"], 100)).toEqual([0, 1]);
+  });
+
+  it("decimates 30 dense date labels and keeps both endpoints", () => {
+    const dates = Array.from({ length: 30 }, (_, i) => `2024-12-${String(i + 1).padStart(2, "0")}`);
+    const idx = visibleLabelIndices(dates, 564 / 30); // band ≈ 18.8px
+    expect(idx[0]).toBe(0);
+    expect(idx[idx.length - 1]).toBe(29);
+    expect(idx.length).toBeLessThan(dates.length);
+    // 严格递增且相邻可见标签放得下（步长至少为 1）
+    for (let k = 1; k < idx.length; k++) {
+      expect(idx[k]).toBeGreaterThan(idx[k - 1]);
+    }
+  });
+
+  it("widens the stride until every adjacent pair fits", () => {
+    // 8 个全宽 CJK 标签（13px 字号、字宽≈13）、槽宽仅 10px：半宽和 13 > 10-2，
+    // 相邻可见标签步长必须 ≥ 2
+    const idx = visibleLabelIndices(
+      ["一二三四五六七八"].join("").split(""),
+      10,
+    );
+    for (let k = 1; k < idx.length; k++) {
+      expect(idx[k] - idx[k - 1]).toBeGreaterThanOrEqual(2);
+    }
+    expect(idx[0]).toBe(0);
+    expect(idx[idx.length - 1]).toBe(7); // 端点优先保留
+  });
+
+  it("returns empty for no categories", () => {
+    expect(visibleLabelIndices([], 20)).toEqual([]);
+  });
+});
+
+describe("dense category labels", () => {
+  const dates = Array.from({ length: 30 }, (_, i) => `2024-12-${String(i + 1).padStart(2, "0")}`);
+  const denseSpec = (chart_type: "bar" | "line"): ChartSpec => ({
+    title: "近 30 天 GMV 趋势",
+    chart_type,
+    data: { categories: dates, series: [{ name: "GMV", values: dates.map((_, i) => 100 + i) }] },
+  });
+
+  it("decimates 30 date labels on a line chart, keeping both endpoints horizontal", () => {
+    const { container } = render(<ChartCard spec={denseSpec("line")} />);
+    const labels = Array.from(container.querySelectorAll(".chart-card__cat-label"));
+    expect(labels.length).toBeLessThan(dates.length);
+    expect(labels.length).toBeGreaterThan(2);
+    // 首尾日期保留；所有标签水平（无 transform 旋转）
+    expect(labels[0].textContent).toContain("2024-12-01");
+    expect(labels[labels.length - 1].textContent).toContain("2024-12-30");
+    for (const l of labels) expect(l.getAttribute("transform")).toBeNull();
+    // 被抽稀的槽位保留短刻度
+    const ticks = container.querySelectorAll(".chart-card__svg line.chart-card__axis");
+    expect(ticks.length).toBeGreaterThan(0);
+  });
+
+  it("decimates 30 date labels on a bar chart the same way", () => {
+    const { container } = render(<ChartCard spec={denseSpec("bar")} />);
+    const labels = Array.from(container.querySelectorAll(".chart-card__cat-label"));
+    expect(labels.length).toBeLessThan(dates.length);
+    for (const l of labels) expect(l.getAttribute("transform")).toBeNull();
+  });
+});
+
+describe("export menu", () => {
+  it("offers PNG and SVG for chart types, CSV only for tables", () => {
+    const { rerender } = render(<ChartCard spec={spec()} />);
+    fireEvent.click(screen.getByLabelText("导出图表"));
+    expect(screen.getByText("导出 PNG")).toBeTruthy();
+    expect(screen.getByText("导出 SVG")).toBeTruthy();
+    expect(screen.queryByText("导出 CSV")).toBeNull();
+
+    // 点击菜单外部关闭
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByText("导出 PNG")).toBeNull();
+
+    rerender(
+      <ChartCard
+        spec={spec({
+          chart_type: "table",
+          data: { categories: ["列1"], series: [{ name: "行1", values: [1] }] },
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("导出图表"));
+    expect(screen.getByText("导出 CSV")).toBeTruthy();
+    expect(screen.queryByText("导出 PNG")).toBeNull();
+  });
+
+  it("closes the menu after choosing an export", () => {
+    render(<ChartCard spec={spec()} />);
+    fireEvent.click(screen.getByLabelText("导出图表"));
+    fireEvent.click(screen.getByText("导出 SVG"));
+    expect(screen.queryByText("导出 SVG")).toBeNull();
+  });
+
+  it("does not show the export entry for empty data", () => {
+    render(
+      <ChartCard
+        spec={{ title: "t", chart_type: "bar", data: { categories: [], series: [] } }}
+      />,
+    );
+    expect(screen.queryByLabelText("导出图表")).toBeNull();
   });
 });

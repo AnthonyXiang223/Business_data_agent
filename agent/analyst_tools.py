@@ -17,6 +17,8 @@ import sqlglot
 import yaml
 from sqlglot import exp
 
+import redis_cache  # SQL 归一化结果缓存（铁律 2 延伸：缓存在工具入口内部）
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 METADATA_FILE = DATA_DIR / "datasets.yaml"
 
@@ -309,6 +311,13 @@ def query_data(name: str, sql: str) -> str:
     ok, result = _validate_sql(name, sql)
     if not ok:
         return f"[被护栏拦截] {result}"
+    # SQL 结果缓存：key 用重生成的规范 SQL（白名单已过、方言已定，
+    # sqlglot 输出确定性格式化）+ 数据集名。命中直接返回——数据文件只读，
+    # TTL 内结果恒定；护栏拦截不缓存（错误信息本来零成本）
+    cache_key = f"sql:v1:{name}:{redis_cache.digest(result)}"
+    cached = redis_cache.get(cache_key)
+    if cached is not None:
+        return cached
     conn = duckdb.connect()
     try:
         conn.register(name, _get_df(name))
@@ -317,7 +326,9 @@ def query_data(name: str, sql: str) -> str:
         return f"查询执行失败: {e}\n请检查 SQL 或先用 get_dataset_schema 确认列名"
     finally:
         conn.close()
-    return _format_result(df)
+    out = _format_result(df)
+    redis_cache.set(cache_key, out, redis_cache.SQL_TTL)
+    return out
 
 
 def create_chart(spec: dict) -> str:

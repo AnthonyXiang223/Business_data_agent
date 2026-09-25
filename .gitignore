@@ -28,3 +28,11 @@ trace_full.json
 # 个人练习文件（与主线无关）
 fast1.py
 demo_agent/workspace/
+# 模型文件 6.5GB：不进 git，README 说明获取方式
+rag/models
+
+# 开发者学习文档/内部文档（不进公开仓库）
+docker-guide.md
+eval-report.md
+CLAUDE.md
+data/test_sql.py
